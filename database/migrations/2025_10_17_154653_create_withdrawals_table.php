@@ -1,26 +1,32 @@
 <?php
+
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration {
+    /**
+     * Run the migrations.
+     */
     public function up(): void
     {
-        Schema::create('payouts', function (Blueprint $table) {
+        Schema::create('withdrawals', function (Blueprint $table) {
             $table->id();
             $table->foreignId('user_id')->constrained()->onDelete('cascade');
             $table->foreignId('payment_method_id')->constrained()->onDelete('cascade');
-            $table->decimal('amount', 10, 2);
+            $table->decimal('amount', 12, 2);
             $table->enum('status', ['pending', 'approved', 'rejected', 'paid'])->default('pending');
-            $table->text('note')->nullable();
+            $table->text('notes')->nullable(); // catatan admin
             $table->timestamps();
         });
 
-
     }
 
+    /**
+     * Reverse the migrations.
+     */
     public function down(): void
     {
-        Schema::dropIfExists('payouts');
+        Schema::dropIfExists('withdrawals');
     }
 };
