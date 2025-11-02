@@ -69,6 +69,8 @@ Route::middleware('throttle:10,1')->post('/links', [LinkController::class, 'stor
 Route::get('/links/{code}', [LinkController::class, 'show']);
 Route::post('/links/{code}/continue', [LinkController::class, 'continue']);
 Route::get('/check-alias/{alias}', [LinkController::class, 'checkAlias']);
+Route::middleware('auth:sanctum')->patch('/links/{id}/toggle-status', [LinkController::class, 'toggleStatus']);
+
 
 // Route::middleware('auth:sanctum')->group(function () {
 //     Route::post('/payment-methods', [PaymentMethodController::class, 'store']);
@@ -82,6 +84,11 @@ Route::get('/check-alias/{alias}', [LinkController::class, 'checkAlias']);
 Route::middleware('auth:sanctum')->group(function () {
     // Route::post('/logout', [AuthController::class, 'logout']);
     // Route::post('/links', [LinkController::class, 'store']); // guest & user
+    Route::get('/links', [LinkController::class, 'index']);
+    Route::put('/links/{code}', [LinkController::class, 'update']);
+    // Route::patch('/links/{id}/toggle-status', [LinkController::class, 'toggleStatus']);
+
+
 
     // Statistik & kontrol link (hanya user)
     Route::get('/links/{code}/stats', [LinkController::class, 'stats']);

@@ -18,6 +18,7 @@ class Link extends Model
         'expired_at',
         'status',
         'admin_comment',
+        'ad_level',
         'earn_per_click',
         'token',
         'token_created_at',

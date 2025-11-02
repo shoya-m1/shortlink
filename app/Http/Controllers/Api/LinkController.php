@@ -18,6 +18,45 @@ use Laravel\Sanctum\PersonalAccessToken;
 
 class LinkController extends Controller
 {
+public function index(Request $request)
+{
+    $user = $request->user();
+    $query = Link::withCount(['views as total_views'])
+        ->where('user_id', $user->id);
+
+    // Search
+    if ($search = $request->input('search')) {
+        $query->where(function ($q) use ($search) {
+            $q->where('title', 'like', "%{$search}%")
+                // ->orWhere('alias', 'like', "%{$search}%")
+                ->orWhere('code', 'like', "%{$search}%");
+        });
+    }
+
+    // Filter by status
+    if ($status = $request->input('status')) {
+        $query->where('status', $status);
+    }
+
+    // Filter top links (by total views)
+    if ($request->input('filter') === 'top_links') {
+        $query->orderByDesc('total_views');
+    }
+
+    // Filter berdasarkan penghasilan (earned)
+    if ($request->input('filter') === 'top_earned') {
+        $query->withSum('views as total_earned', 'earned')
+              ->orderByDesc('total_earned');
+    }
+
+    // Pagination
+    $perPage = $request->input('per_page', 10);
+    $links = $query->latest()->paginate($perPage);
+
+    return response()->json($links);
+}
+
+
     // ==============================
     // 1️⃣ STORE — Buat Shortlink & Simpan di Redis
     // ==============================
@@ -29,6 +68,7 @@ class LinkController extends Controller
             'password' => 'nullable|string|max:255',
             'expired_at' => 'nullable|date|after_or_equal:today', // format: YYYY-MM-DD atau YYYY-MM-DD HH:MM:SS
             'alias' => 'nullable|string|max:20|alpha_dash|unique:links,code',
+            'ad_level' => 'nullable|integer|min:1|max:5',
         ]);
 
         $user = null;
@@ -45,8 +85,23 @@ class LinkController extends Controller
         $maxTries = 5;
         $link = null;
 
+        $adLevel = $validated['ad_level'] ?? 1;
+        $earnRates = [
+            1 => 0.05,
+            2 => 0.07,
+            3 => 0.10,
+            4 => 0.15,
+            5 => 0.20,
+        ];
+        $earnPerClick = $earnRates[$adLevel] ?? 0.05;
+
         do {
             $code = $validated['alias'] ?? Str::random(7);
+            $adLevel = $validated['ad_level'] ?? 1;
+
+            $earnPerClick = $user
+                ? round(0.10 * $adLevel, 2) // naik 0.10 per level
+                : 0.00;
 
             try {
                 $link = Link::create([
@@ -56,7 +111,7 @@ class LinkController extends Controller
                     'title' => $validated['title'] ?? null,
                     'expired_at' => $validated['expired_at'] ?? null,
                     'password' => $validated['password'] ?? null,
-                    'earn_per_click' => $user ? (float) 0.10 : (float) 0.00,
+                    'earn_per_click' => $earnPerClick,
                     'status' => 'active',
                 ]);
                 $created = true;
@@ -358,6 +413,67 @@ class LinkController extends Controller
 
 
     }
+// ==============================
+// PUT - Update Link
+// ==============================
+    public function update(Request $request, $id)
+    {
+        $user = $request->user();
+        $link = Link::where('id', $id)
+            ->where('user_id', $user->id)
+            ->firstOrFail();
+
+        // Validasi lengkap semua field yang boleh diupdate
+        $validated = $request->validate([
+            'original_url' => 'nullable|url|max:2048',
+            'title' => 'nullable|string|max:255',
+            'password' => 'nullable|string|max:255',
+            'expired_at' => 'nullable|date',
+            'alias' => 'nullable|string|max:100|unique:links,code,' . $link->id,
+            'ad_level' => 'nullable|integer|min:1|max:5',
+        ]);
+
+        // Tarif per level (bisa disesuaikan)
+        $earnRates = [
+            1 => 0.05,
+            2 => 0.07,
+            3 => 0.10,
+            4 => 0.15,
+            5 => 0.20,
+        ];
+
+        // Jika user ubah level iklan, perbarui earn_per_click juga
+        $adLevel = $validated['ad_level'] ?? $link->ad_level;
+        $validated['earn_per_click'] = $earnRates[$adLevel] ?? $link->earn_per_click;
+
+        // Update semua field
+        $link->update($validated);
+
+        return response()->json([
+            'message' => 'Link updated successfully',
+            'link' => $link,
+        ]);
+    }
+
+    // ==============================
+    //   Update status Link
+    // ==============================
+    public function toggleStatus(Request $request, $id)
+    {
+        $user = $request->user();
+        $link = Link::where('id', $id)
+            ->where('user_id', $user->id)
+            ->firstOrFail();
+
+        $link->status = $link->status === 'active' ? 'disabled' : 'active';
+        $link->save();
+
+        return response()->json([
+            'message' => 'Status link diperbarui',
+            'status' => $link->status,
+        ]);
+    }
+
 
 
     // ==============================
