@@ -219,7 +219,9 @@ class LinkController extends Controller
 
             // 🧩 3️⃣ Buat token unik & simpan berdasarkan IP dan User-Agent
             $token = Str::uuid()->toString();
-            $ip = $request->ip();
+            // aktifkan jika masuk production
+            // $ip = $request->ip();
+            $ip = $request->ip() === '127.0.0.1' ? '36.84.69.10' : $request->ip();
             $userAgent = $request->header('User-Agent');
             $tokenKey = "token:{$code}:" . md5("{$ip}-{$userAgent}");
 
@@ -285,10 +287,8 @@ class LinkController extends Controller
         }
         RateLimiter::hit("continue:{$ip}", 60);
 
-        // === 2️⃣ Ambil token & link dari cache / DB
-        $cachedToken = Cache::get("token:{$code}");
+        // === 2️⃣ Ambil link (cache/DB)
         $cachedLink = Cache::get("link:{$code}");
-
         $link = $cachedLink
             ? (object) array_merge(['id' => null], $cachedLink)
             : Link::where('code', $code)->firstOrFail();
@@ -302,29 +302,75 @@ class LinkController extends Controller
                     'message' => 'This link is protected by a password.',
                 ], 401);
             }
-
             if ($inputPassword !== $link->password) {
                 return response()->json(['error' => 'Incorrect password.'], 403);
             }
         }
 
-        // === 4️⃣ Validasi Token
-        if (!$cachedToken || $cachedToken['token'] !== $request->token) {
+        // === Ambil token yang dikirim client (body dulu, lalu Bearer header)
+        $inputToken = $request->input('token') ?? $request->bearerToken();
+
+        // === Hitung tokenKey sama persis seperti di show()
+        $userAgent = $request->header('User-Agent') ?? '';
+        $uaNormalized = trim($userAgent);
+        $tokenKey = "token:{$code}:" . md5("{$ip}-{$uaNormalized}");
+
+        // === Ambil dari cache berdasarkan key spesifik (dan fallback ke key generik bila ada)
+        $cachedToken = Cache::get($tokenKey);
+        $checkedKey = $tokenKey;
+        if (!$cachedToken) {
+            // fallback opsional, agar kompatibel bila pernah disimpan tanpa suffix
+            $cachedToken = Cache::get("token:{$code}");
+            $checkedKey = "token:{$code}";
+        }
+
+        // === Normalisasi bentuk cachedToken jadi token string, dan ambil ip/ua/create time jika ada
+        $storedToken = null;
+        $cached_raw = $cachedToken;
+        if (is_array($cachedToken)) {
+            $storedToken = $cachedToken['token'] ?? null;
+            $cached_ip = $cachedToken['ip'] ?? null;
+            $cached_ua = $cachedToken['user_agent'] ?? null;
+            $cached_created = $cachedToken['created_at'] ?? null;
+        } elseif (is_object($cachedToken)) {
+            $storedToken = $cachedToken->token ?? null;
+            $cached_ip = $cachedToken->ip ?? null;
+            $cached_ua = $cachedToken->user_agent ?? null;
+            $cached_created = $cachedToken->created_at ?? null;
+        } else {
+            $storedToken = $cachedToken;
+            $cached_ip = null;
+            $cached_ua = null;
+            $cached_created = null;
+        }
+
+        // === 4️⃣ Validasi Token: pastikan ada dan cocok
+        if (!$storedToken || !$inputToken || !hash_equals((string) $storedToken, (string) $inputToken)) {
             $this->logView($link, $ip, $request, false, 0, 'Invalid token');
             return response()->json(['error' => 'Invalid or missing token.'], 403);
         }
 
-        // Pastikan token sesuai IP & UA
-        $userAgent = $request->header('User-Agent');
-        if (($cachedToken['ip'] ?? null) !== $ip || ($cachedToken['user_agent'] ?? null) !== $userAgent) {
-            $this->logView($link, $ip, $request, false, 0, 'Token mismatch');
+        // === 5️⃣ Pastikan token sesuai IP & UA (jika kamu menyimpannya)
+        if ($cached_ip !== null && $cached_ip !== $ip) {
+            $this->logView($link, $ip, $request, false, 0, 'Token IP mismatch');
+            return response()->json(['error' => 'Token mismatch with client.'], 403);
+        }
+        if ($cached_ua !== null && $cached_ua !== $uaNormalized) {
+            $this->logView($link, $ip, $request, false, 0, 'Token UA mismatch');
             return response()->json(['error' => 'Token mismatch with client.'], 403);
         }
 
-        // === 5️⃣ Cek Token Expired
-        if (Carbon::parse($cachedToken['created_at'])->diffInSeconds(now()) > 180) {
-            Cache::forget("token:{$code}");
-            return response()->json(['error' => 'Token expired. Please reload the page.'], 403);
+        // === 6️⃣ Cek Token Expired (pakai created_at bila ada)
+        if ($cached_created) {
+            try {
+                $created = Carbon::parse($cached_created);
+                if ($created->diffInSeconds(now()) > 180) {
+                    Cache::forget($checkedKey); // hapus key yang benar
+                    return response()->json(['error' => 'Token expired. Please reload the page.'], 403);
+                }
+            } catch (\Exception $e) {
+                // bila format created_at aneh, lanjutkan tanpa exception
+            }
         }
 
         // === 6️⃣ Ambil lokasi (optional, dengan fallback)
@@ -332,19 +378,19 @@ class LinkController extends Controller
             $position = Location::get($ip);
             $country = $position->countryName ?? 'Unknown';
         } catch (\Exception $e) {
-            Log::warning("Location lookup failed", ['ip' => $ip]);
+            // Log::warning("Location lookup failed", ['ip' => $ip]);
             $country = 'Unknown';
         }
 
         // === 7️⃣ Cek View Unik
         $existing = View::where('link_id', $link->id ?? null)
             ->where('ip_address', $ip)
-            ->whereDate('created_at', now()->toDateString())
-            ->first();
+            ->where('created_at', '>=', now()->subSeconds(5))
+            ->exists();
 
         $isUnique = !$existing;
         $isOwnedByUser = !is_null($link->user_id ?? null);
-        $earn = ($isUnique && $isOwnedByUser) ? ($link->earn_per_click ?? 1) : 0;
+        $earned = ($isUnique && $isOwnedByUser) ? ($link->earn_per_click ?? 1) : 0;
         $isSelfClick = true; // ganti false jika aktifkan commnet di bawah
 
         // // Cek jika user login & dia pemilik link
@@ -358,7 +404,24 @@ class LinkController extends Controller
         // }
 
         // === 8️⃣ Log View
-        $this->logView($link, $ip, $request, true, $earn);
+        // $this->logView($link, $ip, $request, true, $earn);
+
+        $userAgent = $request->header('User-Agent');
+        $referer = $request->headers->get('referer');
+        // $country = $note ? 'Unknown' : ($request->input('country') ?? 'Unknown');
+
+        View::create([
+            'link_id' => $link->id ?? null,
+            'ip_address' => $ip,
+            'user_agent' => $userAgent,
+            'referer' => $referer,
+            'country' => $country,
+            'device' => $this->detectDevice($userAgent),
+            'browser' => $this->detectBrowser($userAgent),
+            'is_unique' => $isUnique,
+            'is_valid' => true,
+            'earned' => $earned,
+        ]);
 
         // === jalanakan php artisan queue:work untuk menjalankan proses yang di simpan di anrian atau queue
         // === 9️⃣ Update Saldo User & Pendapatan Link (asynchronous)
@@ -376,19 +439,19 @@ class LinkController extends Controller
         // }
 
         // --- Tambah saldo user (hanya jika bukan self-click)
-        if ($isUnique && $isOwnedByUser && !$isSelfClick) {
+        if ($isUnique && $isOwnedByUser) {
             $user = isset($link->user)
                 ? $link->user
                 : User::find($link->user_id);
 
             if ($user) {
-                $user->increment('balance', $earn);
+                $user->increment('balance', $earned);
             }
 
             if (isset($link->id)) {
                 $linkModel = Link::find($link->id);
                 if ($linkModel) {
-                    $linkModel->increment('total_earned', $earn);
+                    $linkModel->increment('total_earned', $earned);
                 }
             }
         }
@@ -409,7 +472,7 @@ class LinkController extends Controller
         ]);
     }
 
-    // === Helper: Log View (menghindari duplikasi kode)
+    // === Helper: Log View (menghindari duplikasi kode) kode opsinal untuk optimasi
     private function logView($link, $ip, $request, $isValid = false, $earned = 0, $note = null)
     {
         $userAgent = $request->header('User-Agent');
